@@ -32,9 +32,11 @@ export default function Room() {
     };
   }, [roomId]);
 
-  const send = () => {
+    const send = () => {
     if (!msg.trim()) return;
     const username = localStorage.getItem("username") || "Guest";
+    const newMsg = { username, message: msg };
+    setMessages((m) => [...m, newMsg]); // ye line add ki - khud ko bhi dikhega
     socket.emit("send_message", { roomCode: roomId, message: msg, username });
     setMsg("");
   };
