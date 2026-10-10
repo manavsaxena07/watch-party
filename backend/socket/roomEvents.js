@@ -1,214 +1,33 @@
-const {
-    createRoom,
-    joinRoom,
-    getRoom
-} = require("../rooms/roomManager");
+const { rooms, generateRoomCode } = require("../rooms/roomManager");
 
+module.exports = (io, socket) => {
 
-
-function roomEvents(io, socket) {
-
-
-
-//create room
-
-
-
-socket.on("createRoom", ({ username }) => {
-  const roomCode = Math.random().toString(36).substring(2,8).toUpperCase();
-  console.log("Room Created:", roomCode);
-  
-  socket.join(roomCode);
-  
-  const roomData = {
-    roomCode: roomCode,
-    users: [{ id: socket.id, username, isHost: true }],
-    video: { videoId: "", isPlaying: false }
+  const createHandler = ({ username }) => {
+    if (!username) username = "Guest";
+    const roomId = generateRoomCode();
+    rooms[roomId] = { videoId: "", playState: "paused", currentTime: 0, participants: {} };
+    rooms[roomId].participants[socket.id] = { username, userId: socket.id, role: "Host" };
+    socket.join(roomId);
+    console.log(`Room Created ${roomId} by ${username}`);
+    socket.emit("roomCreated", { roomId, roomCode: roomId });
   };
-  
-  // YE 2 LINE SABSE JARURI HAI - Isi se loading hatega
-  socket.emit("roomCreated", roomCode);
-  io.to(roomCode).emit("roomUpdated", roomData); 
-  socket.emit("roomUpdated", roomData);
-});
 
-
-
-
-
-
-
-
-// =========================
-// JOIN ROOM
-// =========================
-
-
-socket.on(
-    "join_room",
-    ({ roomId, username }) => {
-
-
-        roomId =
-            roomId.trim().toUpperCase();
-
-
-
-        const room =
-            joinRoom(
-                roomId,
-                socket.id,
-                username
-            );
-
-
-
-        if (!room) {
-
-
-            socket.emit(
-                "error",
-                "Room not found"
-            );
-
-
-            return;
-
-        }
-
-
-
-
-
-        socket.join(
-            roomId
-        );
-
-
-
-
-
-
-        // Update existing users only
-
-        socket.to(roomId).emit(
-            "room_updated",
-            room
-        );
-
-
-
-
-
-        // Send joining user data
-
-        socket.emit(
-            "join_success",
-            room
-        );
-
-
-
-        socket.emit(
-            "room_updated",
-            room
-        );
-
-
-
-
-
-        // Send current video state
-
-        socket.emit(
-            "sync_state",
-            {
-                videoId: room.video.videoId,
-                currentTime: room.video.currentTime,
-                playing: room.video.playing
-            }
-        );
-
-
-
+  const joinHandler = ({ roomId, roomCode, username }) => {
+    const finalId = (roomId || roomCode || "").toUpperCase().trim();
+    if (!rooms[finalId]) {
+      socket.emit("room-error", "Room not found");
+      return;
     }
-);
+    rooms[finalId].participants[socket.id] = { username, userId: socket.id, role: "Participant" };
+    socket.join(finalId);
+    socket.emit("sync_state", rooms[finalId]);
+    socket.emit("roomJoined", { roomId: finalId, roomCode: finalId });
+    io.to(finalId).emit("user_joined", { username, userId: socket.id, participants: Object.values(rooms[finalId].participants) });
+  };
 
+  socket.on("createRoom", createHandler);
+  socket.on("create_room", createHandler);
 
-
-
-
-
-
-
-
-// =========================
-// GET ROOM
-// =========================
-
-
-socket.on(
-    "get_room",
-    ({ roomId }) => {
-
-
-        roomId =
-            roomId.trim().toUpperCase();
-
-
-
-
-        const room =
-            getRoom(roomId);
-
-
-
-        if (!room) {
-
-
-            socket.emit(
-                "error",
-                "Room not found"
-            );
-
-
-            return;
-
-        }
-
-
-
-
-
-        socket.emit(
-            "room_updated",
-            room
-        );
-
-
-
-
-
-        socket.emit(
-            "sync_state",
-            {
-                videoId: room.video.videoId,
-                currentTime: room.video.currentTime,
-                playing: room.video.playing
-            }
-        );
-
-
-
-    }
-);
-
-
-
-
-
-}
-
-
-
-module.exports = roomEvents;
+  socket.on("joinRoom", joinHandler);
+  socket.on("join_room", joinHandler);
+};
