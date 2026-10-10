@@ -7,83 +7,157 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req,res)=> res.send('Backend OK'));
+app.get('/', (req, res) => res.send('Backend Running OK'));
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "http://localhost:5173", methods: ["GET","POST"] }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 let rooms = {};
 
-function getRoomCode() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-}
-
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log("Connected:", socket.id);
 
-  const createHandler = (data) => {
-    const username = data?.username || data?.name || "Manav";
-    const roomCode = getRoomCode();
-    socket.join(roomCode);
-    rooms[roomCode] = {
-      code: roomCode,
-      users: [{ id: socket.id, username, isHost: true }],
-      videoUrl: "",
-      playing: false,
-      currentTime: 0
-    };
-    console.log(`Room created: ${roomCode} by ${username}`);
-    // jitne bhi naam frontend sun sakta hai sab bhej do
-    socket.emit("roomCreated", roomCode);
-    socket.emit("room-created", roomCode);
-    socket.emit("room-joined", { roomCode, users: rooms[roomCode].users });
-    socket.emit("roomJoined", { roomCode, roomId: roomCode, users: rooms[roomCode].users });
-    socket.emit("updateUsers", rooms[roomCode].users);
-    socket.emit("joinedRoom", rooms[roomCode]);
-  };
-
-  socket.on("createRoom", createHandler);
-  socket.on("create-room", createHandler);
-
-  socket.on("joinRoom", ({ roomCode, username }) => {
-    const code = (roomCode || "").toUpperCase();
-    if (!rooms[code]) {
-      socket.emit("error", "Room not found");
-      socket.emit("room-error", "Room not found");
-      return;
+  socket.on("join_room", ({ roomId, username }) => {
+    if (!roomId ||!username) return;
+    roomId = roomId.toUpperCase();
+    if (!rooms[roomId]) {
+      rooms[roomId] = { videoId: "", playState: "paused", currentTime: 0, participants: {} };
+      rooms[roomId].participants[socket.id] = { username, userId: socket.id, role: "Host" };
+    } else {
+      rooms[roomId].participants[socket.id] = { username, userId: socket.id, role: "Participant" };
     }
-    socket.join(code);
-    rooms[code].users.push({ id: socket.id, username });
-    socket.emit("roomJoined", { roomCode: code, users: rooms[code].users });
-    socket.emit("room-joined", { roomCode: code, users: rooms[code].users });
-    socket.emit("joinedRoom", rooms[code]);
-    io.to(code).emit("updateUsers", rooms[code].users);
-    io.to(code).emit("userJoined", rooms[code].users);
-    console.log(`${username} joined ${code}`);
+    socket.join(roomId);
+    socket.emit("sync_state", {
+      videoId: rooms[roomId].videoId,
+      playState: rooms[roomId].playState,
+      currentTime: rooms[roomId].currentTime
+    });
+    io.to(roomId).emit("user_joined", {
+      username, userId: socket.id,
+      role: rooms[roomId].participants[socket.id].role,
+      participants: Object.values(rooms[roomId].participants)
+    });
   });
 
-  socket.on("join-room", (data) => {
-    const code = (data?.roomCode || data?.code || "").toUpperCase();
-    const username = data?.username || "Guest";
-    if (!rooms[code]) {
-      socket.emit("room-error", "Room not found");
-      return;
+  socket.on("leave_room", ({ roomId }) => {
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (rooms[roomId]?.participants[socket.id]) {
+      const left = rooms[roomId].participants[socket.id];
+      delete rooms[roomId].participants[socket.id];
+      socket.leave(roomId);
+      io.to(roomId).emit("user_left", {
+        username: left.username,
+        userId: socket.id,
+        participants: Object.values(rooms[roomId].participants)
+      });
     }
-    socket.join(code);
-    rooms[code].users.push({ id: socket.id, username });
-    socket.emit("room-joined", { roomCode: code, users: rooms[code].users });
-    io.to(code).emit("updateUsers", rooms[code].users);
+  });
+
+  function isHostOrModerator(roomId) {
+    const p = rooms[roomId]?.participants[socket.id];
+    return p && (p.role === "Host" || p.role === "Moderator");
+  }
+
+  socket.on("play", (data = {}) => {
+    let roomId = data.roomId;
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]) { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (isHostOrModerator(roomId)) {
+      if (data.time!== undefined) rooms[roomId].currentTime = data.time;
+      rooms[roomId].playState = "playing";
+      io.to(roomId).emit("sync_state", {
+        videoId: rooms[roomId].videoId,
+        playState: "playing",
+        currentTime: rooms[roomId].currentTime
+      });
+    }
+  });
+
+  socket.on("pause", (data = {}) => {
+    let roomId = data.roomId;
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]) { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (isHostOrModerator(roomId)) {
+      if (data.time!== undefined) rooms[roomId].currentTime = data.time;
+      rooms[roomId].playState = "paused";
+      io.to(roomId).emit("sync_state", {
+        videoId: rooms[roomId].videoId,
+        playState: "paused",
+        currentTime: rooms[roomId].currentTime
+      });
+    }
+  });
+
+  socket.on("seek", ({ roomId, time }) => {
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]) { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (isHostOrModerator(roomId)) {
+      rooms[roomId].currentTime = time;
+      io.to(roomId).emit("sync_state", {
+        videoId: rooms[roomId].videoId,
+        playState: rooms[roomId].playState,
+        currentTime: time
+      });
+    }
+  });
+
+  socket.on("change_video", ({ roomId, videoId }) => {
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]) { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (isHostOrModerator(roomId)) {
+      rooms[roomId].videoId = videoId;
+      rooms[roomId].currentTime = 0;
+      rooms[roomId].playState = "paused";
+      io.to(roomId).emit("sync_state", { videoId, playState: "paused", currentTime: 0 });
+    }
+  });
+
+  socket.on("assign_role", ({ roomId, userId, role }) => {
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]?.role === "Host") { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (rooms[roomId]?.participants[socket.id]?.role === "Host" && rooms[roomId].participants[userId]) {
+      rooms[roomId].participants[userId].role = role;
+      io.to(roomId).emit("role_assigned", {
+        userId, username: rooms[roomId].participants[userId].username, role,
+        participants: Object.values(rooms[roomId].participants)
+      });
+    }
+  });
+
+  socket.on("remove_participant", ({ roomId, userId }) => {
+    if (!roomId) { for (const r in rooms) if (rooms[r].participants[socket.id]?.role === "Host") { roomId = r; break; } }
+    if (!roomId) return;
+    roomId = roomId.toUpperCase();
+    if (rooms[roomId]?.participants[socket.id]?.role === "Host" && rooms[roomId].participants[userId]) {
+      const target = io.sockets.sockets.get(userId);
+      if (target) target.leave(roomId);
+      delete rooms[roomId].participants[userId];
+      io.to(roomId).emit("participant_removed", { userId, participants: Object.values(rooms[roomId].participants) });
+      io.to(userId).emit("participant_removed", { userId, participants: [] });
+    }
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-    for (const code in rooms) {
-      rooms[code].users = rooms[code].users.filter(u => u.id!== socket.id);
-      io.to(code).emit("updateUsers", rooms[code].users);
+    for (const roomId in rooms) {
+      if (rooms[roomId].participants[socket.id]) {
+        const left = rooms[roomId].participants[socket.id];
+        delete rooms[roomId].participants[socket.id];
+        io.to(roomId).emit("user_left", {
+          username: left.username,
+          userId: socket.id,
+          participants: Object.values(rooms[roomId].participants)
+        });
+      }
     }
   });
 });
 
-server.listen(8000, () => console.log("Server running on port 8000"));
+server.listen(process.env.PORT || 8000, () => console.log("Server running on", process.env.PORT || 8000));
