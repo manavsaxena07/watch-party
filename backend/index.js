@@ -1,92 +1,106 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
 
 const app = express();
 app.use(cors());
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
-const rooms = {}; // roomId -> { videoId, isPlaying, currentTime, participants: {} }
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
 
-io.on('connection', (socket) => {
-  console.log('connected', socket.id);
+const rooms = {}; // { roomCode: { participants: {socketId: {username, role}}, videoId } }
 
-  socket.on('join_room', ({ roomId, username }) => {
-    socket.join(roomId);
-    if (!rooms[roomId]) {
-      rooms[roomId] = { videoId: 'dQw4w9WgXcQ', isPlaying: false, currentTime: 0, hostId: socket.id, participants: {} };
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  socket.on("join_room", ({ roomId, roomCode, username }) => {
+    const code = roomCode || roomId;
+    socket.join(code);
+
+    if (!rooms[code]) {
+      rooms[code] = { participants: {}, videoId: "dQw4w9WgXcQ" };
     }
-    const role = Object.keys(rooms[roomId].participants).length === 0? 'Host' : 'Participant';
-    rooms[roomId].participants[socket.id] = { userId: socket.id, username: username || 'User', role };
 
-    // agar pehla user hai to wahi host
-    if (role === 'Host') rooms[roomId].hostId = socket.id;
+    // Pehla user Host, baki Participant
+    const isFirst = Object.keys(rooms[code].participants).length === 0;
+    const role = isFirst? "Host" : "Participant";
 
-    io.to(roomId).emit('user_joined', { userId: socket.id, username, role, participants: Object.values(rooms[roomId].participants) });
-    io.to(roomId).emit('sync_state', rooms[roomId]);
-    socket.emit('role_assigned', { role });
+    rooms[code].participants[socket.id] = {
+      id: socket.id,
+      username: username || "Guest",
+      role
+    };
+
+    // Sabko users ki list bhejo
+    io.to(code).emit("user_joined", { participants: Object.values(rooms[code].participants) });
+    io.to(code).emit("sync_state", {
+      participants: rooms[code].participants,
+      videoId: rooms[code].videoId
+    });
+
+    // Is user ko uska role batao
+    socket.emit("role_assigned", { role, participants: Object.values(rooms[code].participants) });
+    console.log(`${username} joined ${code} as ${role}`);
   });
 
-  const checkPermission = (roomId, socketId) => {
-    const room = rooms[roomId];
-    if (!room) return false;
-    const user = room.participants[socketId];
-    return user && (user.role === 'Host' || user.role === 'Moderator');
-  };
-
-  socket.on('play', ({ roomId }) => {
-    if (!checkPermission(roomId, socket.id)) return socket.emit('error_msg', 'Only Host/Moderator can control');
-    if (rooms[roomId]) { rooms[roomId].isPlaying = true; io.to(roomId).emit('play'); }
-  });
-
-  socket.on('pause', ({ roomId }) => {
-    if (!checkPermission(roomId, socket.id)) return;
-    if (rooms[roomId]) { rooms[roomId].isPlaying = false; io.to(roomId).emit('pause'); }
-  });
-
-  socket.on('seek', ({ roomId, time }) => {
-    if (!checkPermission(roomId, socket.id)) return;
-    if (rooms[roomId]) { rooms[roomId].currentTime = time; io.to(roomId).emit('seek', { time }); }
-  });
-
-  socket.on('change_video', ({ roomId, videoId }) => {
-    if (!checkPermission(roomId, socket.id)) return;
-    if (rooms[roomId]) { rooms[roomId].videoId = videoId; io.to(roomId).emit('sync_state', rooms[roomId]); }
-  });
-
-  socket.on('assign_role', ({ roomId, userId, role }) => {
-    const room = rooms[roomId];
-    if (!room || room.participants[socket.id]?.role!== 'Host') return;
-    if (room.participants[userId]) {
-      room.participants[userId].role = role;
-      io.to(roomId).emit('role_assigned', { userId, username: room.participants[userId].username, role, participants: Object.values(room.participants) });
+  socket.on("change_video", ({ roomId, roomCode, videoId }) => {
+    const code = roomCode || roomId;
+    if (rooms[code]) {
+      rooms[code].videoId = videoId;
+      io.to(code).emit("video_changed", { videoId });
     }
   });
 
-  socket.on('remove_participant', ({ roomId, userId }) => {
-    const room = rooms[roomId];
-    if (!room || room.participants[socket.id]?.role!== 'Host') return;
-    io.to(userId).emit('participant_removed', { roomId });
-    if (room.participants[userId]) delete room.participants[userId];
-    io.to(roomId).emit('user_left', { userId, participants: Object.values(room.participants) });
+  // YEHI WALA MISSING THA - isse sync hoga
+  socket.on("video_action", ({ roomId, roomCode, action, time }) => {
+    const code = roomCode || roomId;
+    // Host/Moderator ne jo kiya wo sabko bhejo (sender ko chod ke)
+    socket.to(code).emit("video_action", { action, time });
   });
 
-  socket.on('send_message', ({ roomId, message, username }) => {
-    io.to(roomId).emit('receive_message', { username, message });
+  socket.on("send_message", ({ roomId, roomCode, message, username }) => {
+    const code = roomCode || roomId;
+    socket.to(code).emit("receive_message", { username, message });
   });
 
-  socket.on('disconnect', () => {
-    for (const roomId in rooms) {
-      if (rooms[roomId].participants[socket.id]) {
-        delete rooms[roomId].participants[socket.id];
-        io.to(roomId).emit('user_left', { userId: socket.id, participants: Object.values(rooms[roomId].participants) });
+  socket.on("make_moderator", ({ roomCode, targetId }) => {
+    if (rooms[roomCode] && rooms[roomCode].participants[socket.id]?.role === "Host") {
+      if (rooms[roomCode].participants[targetId]) {
+        rooms[roomCode].participants[targetId].role = "Moderator";
+        io.to(roomCode).emit("role_assigned", { participants: Object.values(rooms[roomCode].participants) });
+        io.to(targetId).emit("role_assigned", { role: "Moderator" });
+      }
+    }
+  });
+
+  socket.on("remove_participant", ({ roomCode, targetId }) => {
+    if (rooms[roomCode] && rooms[roomCode].participants[socket.id]?.role === "Host") {
+      io.to(targetId).emit("participant_removed");
+      const targetSocket = io.sockets.sockets.get(targetId);
+      if (targetSocket) {
+        targetSocket.leave(roomCode);
+        delete rooms[roomCode].participants[targetId];
+        io.to(roomCode).emit("user_joined", { participants: Object.values(rooms[roomCode].participants) });
+      }
+    }
+  });
+
+  socket.on("disconnect", () => {
+    for (const code in rooms) {
+      if (rooms[code].participants[socket.id]) {
+        delete rooms[code].participants[socket.id];
+        io.to(code).emit("user_joined", { participants: Object.values(rooms[code].participants) });
+        if (Object.keys(rooms[code].participants).length === 0) delete rooms[code];
+        break;
       }
     }
   });
 });
 
-app.get('/', (req,res)=>res.send('Watch Party Backend Running'));
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, ()=> console.log('Server on '+PORT));
+app.get("/", (req, res) => res.send("Watch Party Backend Running"));
+
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => console.log(`Server on ${PORT}`));
