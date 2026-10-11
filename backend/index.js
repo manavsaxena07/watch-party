@@ -53,12 +53,10 @@ io.on("connection", (socket) => {
       io.to(code).emit("video_changed", { videoId });
     }
   });
-
-  // YEHI WALA MISSING THA - isse sync hoga
   socket.on("video_action", ({ roomId, roomCode, action, time }) => {
     const code = roomCode || roomId;
-    // Host/Moderator ne jo kiya wo sabko bhejo (sender ko chod ke)
-    socket.to(code).emit("video_action", { action, time });
+    console.log(`[VIDEO_ACTION] Room: ${code}, Action: ${action}, Time: ${time}`);
+    io.to(code).emit("video_action", { action, time });
   });
 
   socket.on("send_message", ({ roomId, roomCode, message, username }) => {
