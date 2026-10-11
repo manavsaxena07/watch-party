@@ -58,6 +58,34 @@ io.on("connection", (socket) => {
     console.log(`[VIDEO_ACTION] Room: ${code}, Action: ${action}, Time: ${time}`);
     io.to(code).emit("video_action", { action, time });
   });
+    // PDF wale events - Role check ke saath
+  socket.on("seek", ({ roomCode, time }) => {
+    const room = rooms[roomCode];
+    const user = room?.users.find(u => u.id === socket.id);
+    if (!user || user.role === 'Participant') return; // Role enforcement
+    io.to(roomCode).emit("seek", { time });
+  });
+
+  socket.on("change_video", ({ roomCode, videoId }) => {
+    const room = rooms[roomCode];
+    const user = room?.users.find(u => u.id === socket.id);
+    if (!user || user.role === 'Participant') return;
+    io.to(roomCode).emit("change_video", { videoId });
+    room.videoId = videoId;
+  });
+
+  socket.on("transfer_host", ({ roomCode, targetId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const host = room.users.find(u => u.role === 'Host');
+    if (host.id!== socket.id) return;
+    room.users = room.users.map(u => {
+      if (u.id === targetId) return {...u, role: 'Host' };
+      if (u.id === socket.id) return {...u, role: 'Moderator' };
+      return u;
+    });
+    io.to(roomCode).emit("role_updated", { participants: room.users });
+  });
 
   socket.on("send_message", ({ roomId, roomCode, message, username }) => {
     const code = roomCode || roomId;
